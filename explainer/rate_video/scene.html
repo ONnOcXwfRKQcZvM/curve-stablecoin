@@ -1,0 +1,442 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>crvUSD Rate</title>
+<style>html,body{margin:0;background:#0d1321}canvas{display:block}</style></head>
+<body><canvas id="c" width="1920" height="1080"></canvas>
+<script>
+const W = 1280, H = 720, S = 1.5;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const F = '"WenQuanYi Zen Hei", sans-serif';
+const M = '"DejaVu Sans Mono", "WenQuanYi Zen Hei", monospace';
+
+const C = {
+  bg: '#0d1321', panel: '#162033', grid: '#24314a', axis: '#5b6b88',
+  text: '#e8edf5', dim: '#93a1ba',
+  blue: '#5aa2ff', amber: '#f5b041', red: '#ff6b6b', green: '#3ecf8e', violet: '#b48cff',
+};
+
+// ---------- helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const ease = t => { t = clamp(t); return t * t * (3 - 2 * t); };
+const prog = (t, a, b) => ease((t - a) / (b - a));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function alpha(a, fn) { ctx.save(); ctx.globalAlpha *= clamp(a); fn(); ctx.restore(); }
+
+function text(s, x, y, size, color = C.text, align = 'left', weight = '', font = F) {
+  ctx.font = `${weight} ${size}px ${font}`;
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+}
+
+function rich(segs, x, y, size, align = 'left', font = M) {
+  ctx.font = `${size}px ${font}`;
+  const total = segs.reduce((w, s) => w + ctx.measureText(s[0]).width, 0);
+  let cx = align === 'center' ? x - total / 2 : x;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  for (const [s, col, a] of segs) {
+    alpha(a === undefined ? 1 : a, () => { ctx.fillStyle = col || C.text; ctx.fillText(s, cx, y); });
+    cx += ctx.measureText(s).width;
+  }
+}
+
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+function box(x, y, w, h, color, fill = C.panel) {
+  rrect(x, y, w, h, 12); ctx.fillStyle = fill; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke();
+}
+
+function arrow(x1, y1, x2, y2, p, color = C.dim, w = 2.5) {
+  if (p <= 0) return;
+  const xe = lerp(x1, x2, p), ye = lerp(y1, y2, p);
+  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = w;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(xe, ye); ctx.stroke();
+  const a = Math.atan2(y2 - y1, x2 - x1), L = 11;
+  ctx.beginPath(); ctx.moveTo(xe, ye);
+  ctx.lineTo(xe - L * Math.cos(a - 0.45), ye - L * Math.sin(a - 0.45));
+  ctx.lineTo(xe - L * Math.cos(a + 0.45), ye - L * Math.sin(a + 0.45));
+  ctx.closePath(); ctx.fill();
+}
+
+function title(s, t, color = C.text) {
+  alpha(prog(t, 0, 0.6), () => {
+    text(s, 64, 58, 34, color, 'left', 'bold');
+  });
+}
+
+function caption(list, t) {
+  // list: [[start, end, text], ...] in scene-local seconds
+  for (const [a, b, s] of list) {
+    const k = Math.min(prog(t, a, a + 0.4), 1 - prog(t, b - 0.4, b));
+    if (k <= 0) continue;
+    alpha(k, () => {
+      ctx.font = `24px ${F}`;
+      const w = ctx.measureText(s).width + 48;
+      rrect(W / 2 - w / 2, H - 78, w, 48, 10);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fill();
+      text(s, W / 2, H - 54, 24, C.text, 'center');
+    });
+  }
+}
+
+// plotting
+function Plot(x, y, w, h, xr, yr) { return { x, y, w, h, xr, yr,
+  X(v) { return x + (v - xr[0]) / (xr[1] - xr[0]) * w; },
+  Y(v) { return y + h - (v - yr[0]) / (yr[1] - yr[0]) * h; } }; }
+
+function axes(P, xt, yt, xl, yl, fmtx = v => v, fmty = v => v) {
+  ctx.lineWidth = 1; ctx.strokeStyle = C.grid;
+  for (const v of yt) { ctx.beginPath(); ctx.moveTo(P.x, P.Y(v)); ctx.lineTo(P.x + P.w, P.Y(v)); ctx.stroke();
+    text(fmty(v), P.x - 10, P.Y(v), 15, C.dim, 'right', '', M); }
+  for (const v of xt) { text(fmtx(v), P.X(v), P.y + P.h + 18, 15, C.dim, 'center', '', M); }
+  ctx.strokeStyle = C.axis; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(P.x, P.y); ctx.lineTo(P.x, P.y + P.h); ctx.lineTo(P.x + P.w, P.y + P.h); ctx.stroke();
+  text(xl, P.x + P.w, P.y + P.h + 44, 17, C.dim, 'right');
+  text(yl, P.x, P.y - 22, 17, C.dim, 'left');
+}
+
+function curve(P, f, a, b, p, color, w = 3.5, dash = null) {
+  if (p <= 0) return;
+  ctx.save(); ctx.beginPath(); ctx.rect(P.x, P.y - 2, P.w + 2, P.h + 4); ctx.clip();
+  ctx.strokeStyle = color; ctx.lineWidth = w; if (dash) ctx.setLineDash(dash);
+  ctx.beginPath();
+  const n = 240, end = lerp(a, b, p);
+  for (let i = 0; i <= n; i++) { const v = lerp(a, end, i / n); const px = P.X(v), py = P.Y(f(v));
+    i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+  ctx.stroke(); ctx.restore();
+}
+
+function dot(x, y, color, r = 8) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = C.bg; ctx.stroke();
+}
+
+function vguide(P, xv, yv, color) {
+  ctx.save(); ctx.setLineDash([5, 5]); ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.globalAlpha *= 0.7;
+  ctx.beginPath(); ctx.moveTo(P.X(xv), P.y + P.h); ctx.lineTo(P.X(xv), P.Y(yv)); ctx.lineTo(P.x, P.Y(yv)); ctx.stroke();
+  ctx.restore();
+}
+
+// ---------- scenes ----------
+const SIGMA = 0.02;
+const scenes = [];
+function scene(dur, draw) { scenes.push({ dur, draw }); }
+
+// S1 title
+scene(7, t => {
+  alpha(prog(t, 0.2, 1.2), () => text('crvUSD 的借款利率是怎么定的', W / 2, 300, 56, C.text, 'center', 'bold'));
+  alpha(prog(t, 1.2, 2.2), () => text('价格 · PegKeeper · 债务上限 —— 三个信号,一个公式', W / 2, 380, 28, C.dim, 'center'));
+  alpha(prog(t, 2.2, 3.2), () => text('curve_stablecoin/mpolicies/AggMonetaryPolicy4.vy  ·  calculate_rate()', W / 2, 450, 19, C.blue, 'center', '', M));
+});
+
+// S2 chain
+scene(16, t => {
+  title('谁来定利率?', t);
+  const items = [
+    ['MonetaryPolicy', 'rate_write()', '计算每秒利率', C.violet],
+    ['Controller', '_save_rate()', '借/还/清算时触发', C.blue],
+    ['AMM (LLAMMA)', 'set_rate(rate)', '结算旧利息,换新利率', C.amber],
+    ['rate_mul', '随时间增长', '所有借款人按它复利', C.green],
+  ];
+  const bw = 250, bh = 150, gap = 56, x0 = (W - (bw * 4 + gap * 3)) / 2, y0 = 250;
+  items.forEach(([a, b, c, col], i) => {
+    const st = 0.8 + i * 1.6, k = prog(t, st, st + 0.6);
+    alpha(k, () => {
+      const x = x0 + i * (bw + gap), dy = (1 - k) * 20;
+      box(x, y0 + dy, bw, bh, col);
+      text(a, x + bw / 2, y0 + dy + 42, 24, col, 'center', 'bold');
+      text(b, x + bw / 2, y0 + dy + 80, 18, C.text, 'center', '', M);
+      text(c, x + bw / 2, y0 + dy + 116, 17, C.dim, 'center');
+    });
+    if (i < 3) arrow(x0 + i * (bw + gap) + bw + 6, y0 + bh / 2, x0 + (i + 1) * (bw + gap) - 6, y0 + bh / 2,
+      prog(t, st + 0.6, st + 1.4), C.dim);
+  });
+  // highlight "not LLAMMA"
+  alpha(prog(t, 7.6, 8.4), () => {
+    const x = x0 + 2 * (bw + gap);
+    text('LLAMMA 只"执行"利率,', x + bw / 2, y0 + bh + 50, 19, C.amber, 'center');
+    text('不负责"计算"利率', x + bw / 2, y0 + bh + 78, 19, C.amber, 'center');
+    const xm = x0;
+    text('真正的公式在这里', xm + bw / 2, y0 - 40, 19, C.violet, 'center');
+    arrow(xm + bw / 2, y0 - 26, xm + bw / 2, y0 - 6, 1, C.violet, 2);
+  });
+  caption([
+    [0.5, 7.5, '利率不是 LLAMMA 自己定的'],
+    [7.5, 12, '由 MonetaryPolicy 合约计算,Controller 每次操作时刷新一次'],
+    [12, 15.8, '先看计算公式'],
+  ], t);
+});
+
+// S3 formula
+scene(13, t => {
+  title('一个公式,三个信号', t);
+  const y1 = 220, y2 = 300, y3 = 380, x = 150, sz = 30;
+  rich([['power = ', C.text], ['(1 − p) / σ', C.blue, prog(t, 1, 2)], ['  −  ', C.text, prog(t, 2.5, 3)],
+        ['EMA(PK债务占比) / target', C.amber, prog(t, 2.5, 3.5)]], x, y1, sz);
+  alpha(prog(t, 4, 5), () => rich([['base  = rate0 · exp(power) + extra_const', C.text]], x, y2, sz));
+  alpha(prog(t, 5.5, 6.5), () => rich([['rate  = min( base × ', C.text], ['(0.9 + 0.1/(1 − f))', C.red],
+        [', MAX_RATE )', C.text]], x, y3, sz));
+  const leg = [
+    [C.blue, '① 价格偏离 $1', '全局锚定', 7.5],
+    [C.amber, '② PegKeeper 债务占比', '全局锚定(隐藏的信号)', 8.3],
+    [C.red, '③ 本市场借款 / 债务上限', '单市场风险容量', 9.1],
+  ];
+  leg.forEach(([col, a, b, st], i) => alpha(prog(t, st, st + 0.6), () => {
+    const lx = 150 + i * 340, ly = 500;
+    ctx.fillStyle = col; rrect(lx, ly - 4, 6, 64, 3); ctx.fill();
+    text(a, lx + 20, ly + 12, 22, col, 'left', 'bold');
+    text(b, lx + 20, ly + 46, 18, C.dim);
+  }));
+  caption([[0.5, 7, '前两项决定"基础利率",第三项再按市场容量放大'], [7.2, 12.8, '下面逐个拆开']], t);
+});
+
+// S4 price term
+scene(24, t => {
+  title('① 价格项:负反馈', t, C.blue);
+  const P = Plot(110, 140, 520, 400, [0.96, 1.04], [0, 8]);
+  alpha(prog(t, 0.3, 1), () => axes(P, [0.96, 0.98, 1.0, 1.02, 1.04], [0, 2, 4, 6, 8],
+    'crvUSD 价格 p ($)', '利率倍数(相对 p = $1)', v => v.toFixed(2), v => v + '×'));
+  const f1 = p => Math.exp((1 - p) / SIGMA), f2 = p => Math.exp((1 - p) / (2 * SIGMA));
+  curve(P, f1, 0.96, 1.04, prog(t, 1, 3.5), C.blue);
+  alpha(prog(t, 1, 2), () => text('σ = 0.02', P.X(0.965), P.Y(7.6), 17, C.blue, 'left', '', M));
+  // moving dot
+  if (t > 3.5) {
+    const pp = lerp(1.0, 0.98, prog(t, 4, 6.5));
+    vguide(P, pp, f1(pp), C.blue); dot(P.X(pp), P.Y(f1(pp)), C.blue);
+    alpha(prog(t, 6.5, 7), () => {
+      text('p = 0.98', P.X(0.98) + 16, P.Y(f1(0.98)) - 22, 18, C.text, 'left', '', M);
+      text('→ 利率 ×2.72', P.X(0.98) + 16, P.Y(f1(0.98)) + 4, 18, C.blue, 'left', 'bold');
+    });
+  }
+  // feedback loop
+  const cx = 960, cy = 350, R = 180;
+  const nodes = ['价格 < $1', '利率 ↑', '借款减少 / 还款增加', 'crvUSD 供给收缩', '价格回升'];
+  const n = 4;
+  for (let i = 0; i < n; i++) {
+    const st = 7.5 + i * 1.2, ang = -Math.PI / 2 + i * Math.PI * 2 / n;
+    const nx = cx + R * Math.cos(ang), ny = cy + R * Math.sin(ang);
+    const hot = t > 12.5 && Math.floor((t - 12.5) * 1.2) % n === i;
+    alpha(prog(t, st, st + 0.5), () => {
+      ctx.font = `20px ${F}`; const w = ctx.measureText(nodes[i]).width + 32;
+      box(nx - w / 2, ny - 24, w, 48, C.blue, hot ? '#1f3a63' : C.panel);
+      text(i === 0 && t > 12.5 ? '价格偏离 $1' : nodes[i], nx, ny, 20, C.text, 'center');
+    });
+    ctx.font = `20px ${F}`;
+    const half = j => { const lab = j === 0 && t > 12.5 ? '价格偏离 $1' : nodes[j];
+      return (j % 2 === 0 ? ctx.measureText(lab).width / 2 + 34 : 24 + 26) / R; };
+    const a1 = ang + half(i), a2 = ang + Math.PI * 2 / n - half((i + 1) % n);
+    alpha(prog(t, st + 0.5, st + 1), () => {
+      ctx.strokeStyle = C.dim; ctx.lineWidth = 2.5; ctx.beginPath();
+      ctx.arc(cx, cy, R, a1, a2); ctx.stroke();
+      const ex = cx + R * Math.cos(a2), ey = cy + R * Math.sin(a2), ta = a2 + Math.PI / 2;
+      ctx.fillStyle = C.dim; ctx.beginPath(); ctx.moveTo(ex + 6 * Math.cos(ta), ey + 6 * Math.sin(ta));
+      ctx.lineTo(ex - 12 * Math.cos(ta) + 7 * Math.cos(ta - Math.PI / 2), ey - 12 * Math.sin(ta) + 7 * Math.sin(ta - Math.PI / 2));
+      ctx.lineTo(ex - 12 * Math.cos(ta) - 7 * Math.cos(ta - Math.PI / 2), ey - 12 * Math.sin(ta) - 7 * Math.sin(ta - Math.PI / 2));
+      ctx.closePath(); ctx.fill();
+    });
+  }
+  alpha(prog(t, 12.5, 13), () => text('负反馈回路', cx, cy, 24, C.blue, 'center', 'bold'));
+  // sigma comparison
+  curve(P, f2, 0.96, 1.04, prog(t, 16, 18), C.dim, 3, [8, 6]);
+  alpha(prog(t, 16.5, 17.5), () => text('σ = 0.04', P.X(0.962), P.Y(f2(0.962)) - 22, 17, C.dim, 'left', '', M));
+  caption([
+    [0.5, 4, 'power 里的 (1 − p)/σ:价格低于 $1 时为正,高于 $1 时为负'],
+    [4, 7.5, '价格跌到 $0.98 → power = +1 → 利率变为 e¹ ≈ 2.72 倍'],
+    [7.5, 12.5, '加息 → 借款变贵 → 有人还款、少人新借 → 供给收缩'],
+    [12.5, 16, '价格高于 $1 时反过来:降息,鼓励借款增加供给'],
+    [16, 20, 'σ 控制灵敏度:σ 越小,同样的偏离引起越剧烈的利率变化'],
+    [20, 23.8, '指数形式:偏离越大,反应越猛'],
+  ], t);
+});
+
+// S5 PegKeeper
+scene(28, t => {
+  title('② PegKeeper 项:价格项看不见的压力', t, C.amber);
+  // left: time series schematic
+  const P = Plot(110, 150, 500, 220, [0, 10], [0.99, 1.04]);
+  const P2 = Plot(110, 420, 500, 110, [0, 10], [0, 1]);
+  const pressure = x => 1 + 0.03 * ease(x / 6);           // hypothetical price without PK
+  const pk = x => ease(x / 6);                              // PK debt grows
+  const tp = prog(t, 0.8, 8);
+  alpha(prog(t, 0.3, 0.8), () => {
+    axes(P, [], [1.0, 1.02, 1.04], '', '价格 ($)', v => v, v => v.toFixed(2));
+    axes(P2, [0, 5, 10], [], '时间', 'PK 债务', v => '');
+  });
+  curve(P, pressure, 0, 10, tp, C.dim, 2.5, [8, 6]);
+  curve(P, () => 1.0, 0, 10, tp, C.blue, 3.5);
+  // PK debt area
+  if (tp > 0) {
+    ctx.fillStyle = 'rgba(245,176,65,0.35)'; ctx.strokeStyle = C.amber; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(P2.X(0), P2.Y(0));
+    const end = 10 * tp;
+    for (let i = 0; i <= 120; i++) { const x = end * i / 120; ctx.lineTo(P2.X(x), P2.Y(pk(x) * 0.9)); }
+    ctx.lineTo(P2.X(end), P2.Y(0)); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  alpha(prog(t, 3, 3.6), () => {
+    text('没有 PegKeeper 时的价格', P.X(6.2), P.Y(1.034) - 18, 16, C.dim);
+    text('实际价格:稳在 $1', P.X(6.2), P.Y(1.0) - 18, 16, C.blue);
+    text('PK 铸币注入池子 → 债务增加', P2.X(0.3), P2.Y(0.95), 16, C.amber);
+  });
+  // right: rate vs ratio/target
+  const Q = Plot(760, 150, 420, 380, [0, 3], [0, 3]);
+  const g = x => Math.exp(-(x - 1));
+  alpha(prog(t, 12, 12.6), () => axes(Q, [0, 1, 2, 3], [0, 1, 2, 3], 'PK 债务占比 / target', '利率倍数(相对占比 = target)',
+    v => v + '×', v => v + '×'));
+  curve(Q, g, 0, 3, prog(t, 12.6, 14.5), C.amber);
+  if (t > 14.5) {
+    const xv = t < 20 ? lerp(1, 2, prog(t, 15, 17.5)) : lerp(2, 0.3, prog(t, 20, 22.5));
+    vguide(Q, xv, g(xv), C.amber); dot(Q.X(xv), Q.Y(g(xv)), C.amber);
+    alpha(prog(t, 17.5, 18) * (1 - prog(t, 19.6, 20)), () =>
+      text(`占比 2× target → 利率 ×${g(2).toFixed(2)}`, Q.X(2) + 14, Q.Y(g(2)) - 26, 17, C.amber, 'left', 'bold'));
+    alpha(prog(t, 22.5, 23), () =>
+      text(`占比很低 → 利率 ×${g(0.3).toFixed(2)}`, Q.X(0.3) + 16, Q.Y(g(0.3)) - 6, 17, C.amber, 'left', 'bold'));
+  }
+  caption([
+    [0.5, 4.5, 'crvUSD 供不应求时,PegKeeper 铸币注入池子,把价格压回 $1'],
+    [4.5, 8.5, '价格项看到的是 $1:上涨压力被抹平了'],
+    [8.5, 12.3, '但这股压力被记在了 PegKeeper 的债务里'],
+    [12.3, 15, 'power 里减去 EMA(占比) / target'],
+    [15, 20, '占比高于 target → 降息,鼓励抵押借款来补供给,减少对 PK 的依赖'],
+    [20, 24.5, '占比低 → PK 没有存量,跌破 $1 时无法回收 crvUSD,只能靠加息守锚'],
+    [24.5, 27.8, '用 EMA 平滑:单笔大额操作不会让利率瞬间跳变'],
+  ], t);
+});
+
+// S6 ceiling
+scene(22, t => {
+  title('③ 债务上限项:单市场风险容量', t, C.red);
+  const P = Plot(110, 150, 560, 390, [0, 1], [0, 12]);
+  const m = f => 0.9 + 0.1 / (1 - f);
+  alpha(prog(t, 0.3, 1), () => axes(P, [0, 0.25, 0.5, 0.75, 1], [0, 2, 4, 6, 8, 10, 12],
+    'f = 本市场债务 / 债务上限', '利率乘数', v => v, v => v + '×'));
+  curve(P, m, 0, 0.991, prog(t, 1, 4.5), C.red);
+  const pts = [[0, '1.0×', 5], [0.5, '1.1×', 6.2], [0.9, '1.9×', 7.4], [0.99, '10.9×', 8.6]];
+  for (const [f, lab, st] of pts) alpha(prog(t, st, st + 0.5), () => {
+    dot(P.X(f), P.Y(m(f)), C.red, 7);
+    text(lab, P.X(f) + (f > 0.85 ? -16 : 12), P.Y(m(f)) - (f > 0.85 ? 4 : 22), 18, C.text, f > 0.85 ? 'right' : 'left', 'bold', M);
+  });
+  // right notes
+  const notes = [
+    [10.5, 'f 截断在 0.9999', '→ 乘数约 1000×,再被 MAX_RATE 封顶', '(约 300% 年化)'],
+    [14, '上限被调低到债务以下、或上限 = 0', '→ 不会 revert,直接给最高利率', '"这个市场不要再借了"'],
+  ];
+  notes.forEach(([st, a, b, c], i) => alpha(prog(t, st, st + 0.6), () => {
+    const x = 740, y = 190 + i * 170;
+    box(x, y, 470, 136, C.red);
+    text(a, x + 22, y + 34, 20, C.red, 'left', 'bold');
+    text(b, x + 22, y + 72, 18, C.text);
+    text(c, x + 22, y + 104, 18, C.dim);
+  }));
+  caption([
+    [0.5, 5, '乘数 = 0.9 + 0.1 / (1 − f),与锚定无关,只看这个市场借了多少'],
+    [5, 10, '借到一半只多 10%,90% 时 1.9 倍,之后急剧上升'],
+    [10, 14, '同时防止除以 0'],
+    [14, 18, '和防止 uint256 下溢'],
+    [18, 21.8, '用"利率拉满"表达"不想要更多借款"'],
+  ], t);
+});
+
+// S7 rate_mul
+scene(22, t => {
+  title('利率如何变成你的债务', t, C.green);
+  const T = 10;
+  const segs = [[0, 3, 0.06], [3, 6.5, 0.15], [6.5, 10, 0.09]]; // [start, end, rate per unit time]
+  const rateAt = x => segs.find(s => x >= s[0] && x <= s[1])[2];
+  const mulAt = x => { let m = 1; for (const [a, b, r] of segs) { if (x <= a) break; m *= 1 + r * (Math.min(x, b) - a); } return m; };
+  const P = Plot(110, 140, 640, 150, [0, T], [0, 0.2]);
+  const Q = Plot(110, 360, 640, 210, [0, T], [1, 2.5]);
+  alpha(prog(t, 0.3, 1), () => {
+    axes(P, [], [0, 0.1, 0.2], '', 'rate(每秒利率,示意)', v => v, v => '');
+    axes(Q, [], [1, 1.5, 2, 2.5], '时间', 'rate_mul', v => v, v => v.toFixed(1));
+  });
+  const cur = lerp(0, T, prog(t, 1, 12));
+  // rate step
+  ctx.strokeStyle = C.violet; ctx.lineWidth = 3.5; ctx.beginPath();
+  for (const [a, b, r] of segs) { if (cur <= a) break; const e = Math.min(cur, b);
+    ctx.moveTo(P.X(a), P.Y(r)); ctx.lineTo(P.X(e), P.Y(r)); }
+  ctx.stroke();
+  // set_rate markers
+  for (const [a] of segs) if (cur >= a) {
+    ctx.save(); ctx.setLineDash([4, 5]); ctx.strokeStyle = C.amber; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(P.X(a), P.y); ctx.lineTo(P.X(a), Q.y + Q.h); ctx.stroke(); ctx.restore();
+    text('set_rate', P.X(a) + 6, P.y + 8, 14, C.amber, 'left', '', M);
+  }
+  curve(Q, mulAt, 0, T, cur / T, C.green);
+  if (cur > 0) dot(Q.X(cur), Q.Y(mulAt(cur)), C.green, 6);
+  // open position marker
+  const open = 2;
+  if (cur >= open) {
+    alpha(prog(t, 3, 3.5), () => { dot(Q.X(open), Q.Y(mulAt(open)), C.blue, 8);
+      text('开仓:记下 rate_mul₀', Q.X(open) - 20, Q.Y(mulAt(open)) - 56, 16, C.blue, 'center'); });
+  }
+  // right formula
+  alpha(prog(t, 13, 14), () => {
+    const x = 800, y = 200;
+    box(x, y, 410, 250, C.green);
+    text('每个借款人只存两个数', x + 24, y + 38, 20, C.green, 'left', 'bold');
+    text('initial_debt, rate_mul₀', x + 24, y + 76, 18, C.text, 'left', '', M);
+    text('当前债务 =', x + 24, y + 128, 20, C.text);
+    text('initial_debt', x + 24, y + 164, 19, C.text, 'left', '', M);
+    text('  × rate_mul / rate_mul₀', x + 24, y + 198, 19, C.green, 'left', '', M);
+  });
+  caption([
+    [0.5, 4, 'rate_mul 从 1.0 开始,按当前利率随时间增长'],
+    [4, 8, '每次 set_rate:先把旧利率下累积的部分固化进 rate_mul,再换新利率'],
+    [8, 12.5, '利率越高,rate_mul 涨得越快:分段复利'],
+    [12.5, 17.5, '借款人的债务 = 开仓时的债务 × 这段时间 rate_mul 的涨幅'],
+    [17.5, 21.8, '不用逐个更新借款人,一个全局变量就算出所有人的利息'],
+  ], t);
+});
+
+// S8 summary
+scene(14, t => {
+  title('总结', t);
+  const rows = [
+    [C.blue, '① crvUSD 价格', '低于 $1 → 加息', '高于 $1 → 降息', '全局锚定'],
+    [C.amber, '② PK 债务占比', '高于 target → 降息', '低于 target → 加息', '全局锚定'],
+    [C.red, '③ 债务 / 上限', '越接近上限 → 加息', '截断 + MAX_RATE 封顶', '单市场风险'],
+  ];
+  const x = 120, cols = [0, 270, 560, 860];
+  alpha(prog(t, 0.4, 1), () => {
+    ['信号', '方向', '', '解决的问题'].forEach((h, i) => text(h, x + cols[i], 150, 18, C.dim));
+  });
+  rows.forEach(([col, a, b, c, d], i) => alpha(prog(t, 1 + i * 0.9, 1.6 + i * 0.9), () => {
+    const y = 210 + i * 100;
+    ctx.fillStyle = C.panel; rrect(x - 20, y - 38, 1080, 80, 10); ctx.fill();
+    ctx.fillStyle = col; rrect(x - 20, y - 38, 6, 80, 3); ctx.fill();
+    text(a, x + cols[0], y, 22, col, 'left', 'bold');
+    text(b, x + cols[1], y - 13, 19, C.text); text(c, x + cols[1], y + 15, 19, C.dim);
+    text(d, x + cols[3], y, 19, C.text);
+  }));
+  alpha(prog(t, 5, 6), () => rich([['rate = min( (', C.text], ['rate0·exp(power)', C.blue], [' + extra_const) × ', C.text],
+    ['(0.9 + 0.1/(1−f))', C.red], [', MAX_RATE )', C.text]], W / 2, 545, 22, 'center'));
+  alpha(prog(t, 7, 8), () => text('然后 rate → AMM.set_rate → rate_mul → 每个人的债务', W / 2, 600, 20, C.green, 'center'));
+});
+
+const TOTAL = scenes.reduce((s, x) => s + x.dur, 0);
+
+function render(time) {
+  ctx.setTransform(S, 0, 0, S, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  let t0 = 0;
+  for (const sc of scenes) {
+    if (time >= t0 && time < t0 + sc.dur) {
+      const lt = time - t0;
+      const k = Math.min(prog(lt, 0, 0.5), 1 - prog(lt, sc.dur - 0.5, sc.dur));
+      alpha(k, () => sc.draw(lt));
+      break;
+    }
+    t0 += sc.dur;
+  }
+  // progress bar
+  ctx.fillStyle = C.grid; ctx.fillRect(0, H - 4, W, 4);
+  ctx.fillStyle = C.blue; ctx.fillRect(0, H - 4, W * time / TOTAL, 4);
+}
+window.TOTAL = TOTAL; window.render = render;
+window.ready = document.fonts.load(`20px ${F}`).then(() => document.fonts.load(`20px ${M}`)).then(() => true);
+</script></body></html>
